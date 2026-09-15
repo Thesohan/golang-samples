@@ -21,9 +21,12 @@ import (
 	"os"
 	"reflect"
 	"strings"
+	"time"
 
 	"testing"
 
+	resourcemanager "cloud.google.com/go/resourcemanager/apiv3"
+	"cloud.google.com/go/resourcemanager/apiv3/resourcemanagerpb"
 	secretmanager "cloud.google.com/go/secretmanager/apiv1"
 	"cloud.google.com/go/secretmanager/apiv1/secretmanagerpb"
 	"github.com/GoogleCloudPlatform/golang-samples/internal/testutil"
@@ -73,6 +76,30 @@ func testRegionalClient(tb testing.TB) (*secretmanager.Client, context.Context) 
 	return client, ctx
 }
 
+func testResourceManagerTagsKeyClient(tb testing.TB) (*resourcemanager.TagKeysClient, context.Context) {
+	tb.Helper()
+	ctx := context.Background()
+
+	client, err := resourcemanager.NewTagKeysClient(ctx)
+	if err != nil {
+		tb.Fatalf("testResourceManagerTagsKeyClient: failed to create client: %v", err)
+	}
+	return client, ctx
+
+}
+
+func testResourceManagerTagsValueClient(tb testing.TB) (*resourcemanager.TagValuesClient, context.Context) {
+	tb.Helper()
+	ctx := context.Background()
+
+	client, err := resourcemanager.NewTagValuesClient(ctx)
+	if err != nil {
+		tb.Fatalf("testResourceManagerTagsValueClient: failed to create client: %v", err)
+	}
+	return client, ctx
+
+}
+
 func testName(tb testing.TB) string {
 	tb.Helper()
 
@@ -98,6 +125,12 @@ func testSecret(tb testing.TB, projectID string) *secretmanagerpb.Secret {
 					Automatic: &secretmanagerpb.Replication_Automatic{},
 				},
 			},
+			Labels: map[string]string{
+				"labelkey": "labelvalue",
+			},
+			Annotations: map[string]string{
+				"annotationkey": "annotationvalue",
+			},
 		},
 	})
 	if err != nil {
@@ -117,6 +150,14 @@ func testRegionalSecret(tb testing.TB, projectID string) (*secretmanagerpb.Secre
 	secret, err := client.CreateSecret(ctx, &secretmanagerpb.CreateSecretRequest{
 		Parent:   fmt.Sprintf("projects/%s/locations/%s", projectID, locationID),
 		SecretId: secretID,
+		Secret: &secretmanagerpb.Secret{
+			Annotations: map[string]string{
+				"annotationkey": "annotationvalue",
+			},
+			Labels: map[string]string{
+				"labelkey": "labelvalue",
+			},
+		},
 	})
 	if err != nil {
 		tb.Fatalf("testSecret: failed to create secret: %v", err)
@@ -295,15 +336,71 @@ func TestCreateSecret(t *testing.T) {
 	secretID := "createSecret"
 
 	parent := fmt.Sprintf("projects/%s", tc.ProjectID)
-	defer testCleanupSecret(t, fmt.Sprintf("projects/%s/secrets/%s", tc.ProjectID, secretID))
 
 	var b bytes.Buffer
 	if err := createSecret(&b, parent, secretID); err != nil {
 		t.Fatal(err)
 	}
+	defer testCleanupSecret(t, fmt.Sprintf("projects/%s/secrets/%s", tc.ProjectID, secretID))
 
 	if got, want := b.String(), "Created secret:"; !strings.Contains(got, want) {
 		t.Errorf("createSecret: expected %q to contain %q", got, want)
+	}
+}
+
+func TestCreateSecretWithTTL(t *testing.T) {
+	tc := testutil.SystemTest(t)
+
+	secretID := "createSecretTTL"
+
+	parent := fmt.Sprintf("projects/%s", tc.ProjectID)
+
+	duration := time.Second * 70
+
+	var b bytes.Buffer
+	if err := createSecretWithTTL(&b, parent, secretID, duration); err != nil {
+		t.Fatal(err)
+	}
+	defer testCleanupSecret(t, fmt.Sprintf("projects/%s/secrets/%s", tc.ProjectID, secretID))
+
+	if got, want := b.String(), "Created secret with ttl:"; !strings.Contains(got, want) {
+		t.Errorf("createSecretWithTTL: expected %q to contain %q", got, want)
+	}
+}
+
+func TestCreateSecretWithLabels(t *testing.T) {
+	tc := testutil.SystemTest(t)
+
+	secretID := "createSecretWithLabels"
+
+	parent := fmt.Sprintf("projects/%s", tc.ProjectID)
+
+	var b bytes.Buffer
+	if err := createSecretWithLabels(&b, parent, secretID); err != nil {
+		t.Fatal(err)
+	}
+	defer testCleanupSecret(t, fmt.Sprintf("projects/%s/secrets/%s", tc.ProjectID, secretID))
+
+	if got, want := b.String(), "Created secret with labels:"; !strings.Contains(got, want) {
+		t.Errorf("createSecretWithLabels: expected %q to contain %q", got, want)
+	}
+}
+
+func TestCreateSecretWithAnnotations(t *testing.T) {
+	tc := testutil.SystemTest(t)
+
+	secretID := "createSecretWithAnnotations"
+
+	parent := fmt.Sprintf("projects/%s", tc.ProjectID)
+
+	var b bytes.Buffer
+	if err := createSecretWithAnnotations(&b, parent, secretID); err != nil {
+		t.Fatal(err)
+	}
+	defer testCleanupSecret(t, fmt.Sprintf("projects/%s/secrets/%s", tc.ProjectID, secretID))
+
+	if got, want := b.String(), "Created secret with annotations:"; !strings.Contains(got, want) {
+		t.Errorf("createSecretWithAnnotations: expected %q to contain %q", got, want)
 	}
 }
 
@@ -313,12 +410,11 @@ func TestCreateRegionalSecret(t *testing.T) {
 	secretID := "createRegionalSecret"
 	locationID := testLocation(t)
 
-	defer testCleanupRegionalSecret(t, fmt.Sprintf("projects/%s/locations/%s/secrets/%s", tc.ProjectID, locationID, secretID))
-
 	var b bytes.Buffer
 	if err := regional_secretmanager.CreateRegionalSecret(&b, tc.ProjectID, locationID, secretID); err != nil {
 		t.Fatal(err)
 	}
+	defer testCleanupRegionalSecret(t, fmt.Sprintf("projects/%s/locations/%s/secrets/%s", tc.ProjectID, locationID, secretID))
 
 	if got, want := b.String(), "Created regional secret:"; !strings.Contains(got, want) {
 		t.Errorf("createSecret: expected %q to contain %q", got, want)
@@ -332,12 +428,12 @@ func TestCreateUserManagedReplicationSecret(t *testing.T) {
 	locations := []string{"us-east1", "us-east4", "us-west1"}
 
 	parent := fmt.Sprintf("projects/%s", tc.ProjectID)
-	defer testCleanupSecret(t, fmt.Sprintf("projects/%s/secrets/%s", tc.ProjectID, secretID))
 
 	var b bytes.Buffer
 	if err := createUserManagedReplicationSecret(&b, parent, secretID, locations); err != nil {
 		t.Fatal(err)
 	}
+	defer testCleanupSecret(t, fmt.Sprintf("projects/%s/secrets/%s", tc.ProjectID, secretID))
 
 	if got, want := b.String(), "Created secret with user managed replication:"; !strings.Contains(got, want) {
 		t.Errorf("createUserManagedReplicationSecret: expected %q to contain %q", got, want)
@@ -363,6 +459,30 @@ func TestDeleteSecret(t *testing.T) {
 	}
 }
 
+func TestDeleteSecretLabel(t *testing.T) {
+	tc := testutil.SystemTest(t)
+
+	secret := testSecret(t, tc.ProjectID)
+	defer testCleanupSecret(t, secret.Name)
+
+	var b bytes.Buffer
+	if err := deleteSecretLabel(&b, secret.Name); err != nil {
+		t.Fatal(err)
+	}
+
+	client, ctx := testClient(t)
+	s, err := client.GetSecret(ctx, &secretmanagerpb.GetSecretRequest{
+		Name: secret.Name,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got, want := s.Labels, map[string]string{}; reflect.DeepEqual(got, want) {
+		t.Errorf("deleteSecretLabel: expected %q to be %q", got, want)
+	}
+}
+
 func TestDeleteRegionalSecret(t *testing.T) {
 	tc := testutil.SystemTest(t)
 
@@ -382,6 +502,7 @@ func TestDeleteRegionalSecret(t *testing.T) {
 	if terr, ok := grpcstatus.FromError(err); !ok || terr.Code() != grpccodes.NotFound {
 		t.Errorf("deleteRegionalSecret: expected %v to be not found", err)
 	}
+
 }
 
 func TestDeleteSecretWithEtag(t *testing.T) {
@@ -1021,6 +1142,62 @@ func TestListSecrets(t *testing.T) {
 	}
 }
 
+func TestViewSecretLabels(t *testing.T) {
+	tc := testutil.SystemTest(t)
+
+	secret := testSecret(t, tc.ProjectID)
+	defer testCleanupSecret(t, secret.Name)
+
+	var b bytes.Buffer
+	if err := viewSecretLabels(&b, secret.Name); err != nil {
+		t.Fatal(err)
+	}
+
+	if got, want := b.String(), "Found secret"; !strings.Contains(got, want) {
+		t.Errorf("viewSecretLabels: expected %q to contain %q", got, want)
+	}
+
+	client, ctx := testClient(t)
+	s, err := client.GetSecret(ctx, &secretmanagerpb.GetSecretRequest{
+		Name: secret.Name,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got, want := s.Labels, map[string]string{"labelkey": "labelvalue"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("viewSecretLabels: expected %q to be %q", got, want)
+	}
+}
+
+func TestViewSecretAnnotations(t *testing.T) {
+	tc := testutil.SystemTest(t)
+
+	secret := testSecret(t, tc.ProjectID)
+	defer testCleanupSecret(t, secret.Name)
+
+	var b bytes.Buffer
+	if err := viewSecretAnnotations(&b, secret.Name); err != nil {
+		t.Fatal(err)
+	}
+
+	if got, want := b.String(), "Found secret"; !strings.Contains(got, want) {
+		t.Errorf("viewSecretAnnotations: expected %q to contain %q", got, want)
+	}
+
+	client, ctx := testClient(t)
+	s, err := client.GetSecret(ctx, &secretmanagerpb.GetSecretRequest{
+		Name: secret.Name,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got, want := s.Annotations, map[string]string{"annotationkey": "annotationvalue"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("viewSecretAnnotations: expected %q to be %q", got, want)
+	}
+}
+
 func TestListRegionalSecrets(t *testing.T) {
 	tc := testutil.SystemTest(t)
 
@@ -1122,6 +1299,64 @@ func TestUpdateSecret(t *testing.T) {
 	}
 }
 
+func TestCreateUpdateSecretLabel(t *testing.T) {
+	tc := testutil.SystemTest(t)
+
+	secret := testSecret(t, tc.ProjectID)
+	defer testCleanupSecret(t, secret.Name)
+
+	var b bytes.Buffer
+	if err := createUpdateSecretLabel(&b, secret.Name); err != nil {
+		t.Fatal(err)
+	}
+
+	if got, want := b.String(), "Updated secret"; !strings.Contains(got, want) {
+		t.Errorf("updateSecret: expected %q to contain %q", got, want)
+	}
+
+	client, ctx := testClient(t)
+
+	s, err := client.GetSecret(ctx, &secretmanagerpb.GetSecretRequest{
+		Name: secret.Name,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got, want := s.Labels, map[string]string{"labelkey": "updatedlabelvalue"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("createUpdateSecretLabel: expected %q to be %q", got, want)
+	}
+}
+
+func TestEditSecretAnnotations(t *testing.T) {
+	tc := testutil.SystemTest(t)
+
+	secret := testSecret(t, tc.ProjectID)
+	defer testCleanupSecret(t, secret.Name)
+
+	var b bytes.Buffer
+	if err := editSecretAnnotation(&b, secret.Name); err != nil {
+		t.Fatal(err)
+	}
+
+	if got, want := b.String(), "Updated secret"; !strings.Contains(got, want) {
+		t.Errorf("updateSecret: expected %q to contain %q", got, want)
+	}
+
+	client, ctx := testClient(t)
+
+	s, err := client.GetSecret(ctx, &secretmanagerpb.GetSecretRequest{
+		Name: secret.Name,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got, want := s.Annotations, map[string]string{"annotationkey": "updatedannotationvalue"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("editSecretAnnotation: expected %q to be %q", got, want)
+	}
+}
+
 func TestRegionalUpdateSecret(t *testing.T) {
 	tc := testutil.SystemTest(t)
 
@@ -1140,6 +1375,7 @@ func TestRegionalUpdateSecret(t *testing.T) {
 	}
 
 	client, ctx := testRegionalClient(t)
+
 	s, err := client.GetSecret(ctx, &secretmanagerpb.GetSecretRequest{
 		Name: secret.Name,
 	})
@@ -1270,4 +1506,171 @@ func TestUpdateRegionalSecretWithAlias(t *testing.T) {
 	if got, want := s.VersionAliases, map[string]int64{"test": 1}; !reflect.DeepEqual(got, want) {
 		t.Errorf("updateRegionalSecret: expected %q to be %q", got, want)
 	}
+}
+
+func testCreateTagKey(tb testing.TB, projectID string) *resourcemanagerpb.TagKey {
+	tb.Helper()
+
+	client, ctx := testResourceManagerTagsKeyClient(tb)
+	parent := fmt.Sprintf("projects/%s", projectID)
+	uniqueSuffix := time.Now().Unix()
+	tagKeyName := fmt.Sprintf("sm_secret_tag_sample_test_%d", uniqueSuffix)
+	tagKeyDescription := "creating tag key for secretmanager tags sample"
+
+	tagKeyOperation, err := client.CreateTagKey(ctx, &resourcemanagerpb.CreateTagKeyRequest{
+		TagKey: &resourcemanagerpb.TagKey{
+			Parent:      parent,
+			ShortName:   tagKeyName,
+			Description: tagKeyDescription,
+		},
+	})
+	if err != nil {
+		tb.Fatalf("testCreateTagKey: failed to create tagKey: %v", err)
+	}
+
+	createdTagKey, err := tagKeyOperation.Wait(ctx)
+	if err != nil {
+		tb.Fatalf("testCreateTagKey: failed to create TagKey after waiting for operation: %v", err)
+	}
+
+	return createdTagKey
+}
+
+func testCreateTagValue(tb testing.TB, tagKeyId string) *resourcemanagerpb.TagValue {
+	tb.Helper()
+
+	client, ctx := testResourceManagerTagsValueClient(tb)
+	tagValueName := "sm_secret_tag_value_sample_test1"
+	tagKeyDescription := "creating TagValue for secretmanager tags sample"
+
+	tagKeyOperation, err := client.CreateTagValue(ctx, &resourcemanagerpb.CreateTagValueRequest{
+		TagValue: &resourcemanagerpb.TagValue{
+			Parent:      tagKeyId,
+			ShortName:   tagValueName,
+			Description: tagKeyDescription,
+		},
+	})
+	if err != nil {
+		tb.Fatalf("testCreateTagValue: failed to create tagValue: %v", err)
+	}
+
+	createdTagValue, err := tagKeyOperation.Wait(ctx)
+	if err != nil {
+		tb.Fatalf("testCreateTagValue: failed to create TagValue after waiting for operation: %v", err)
+	}
+
+	return createdTagValue
+}
+
+func testCleanupTagKey(tb testing.TB, tagKeyName string) {
+	tb.Helper()
+
+	client, ctx := testResourceManagerTagsKeyClient(tb)
+
+	tagKeyOperation, err := client.DeleteTagKey(ctx, &resourcemanagerpb.DeleteTagKeyRequest{
+		Name: tagKeyName,
+	})
+	if err != nil {
+		tb.Fatalf("testCleanupTagKey: failed to delete tagKey: %v", err)
+		return
+	}
+
+	_, err = tagKeyOperation.Wait(ctx)
+	if err != nil {
+		tb.Fatalf("testCleanupTagKey: failed to delete TagKey after waiting for operation: %v", err)
+	}
+}
+
+// Polling to clean up the tag value because, after deleting a secret, it takes some time for the tag value to become unbound.
+func testCleanupTagValue(tb testing.TB, tagValueName string) {
+	tb.Helper()
+
+	client, ctx := testResourceManagerTagsValueClient(tb)
+
+	maxPollingDuration := 10 * time.Minute
+	initialDelay := 2 * time.Second
+	maxBackoffDelay := 30 * time.Second
+
+	startTime := time.Now()
+	attempt := 0
+
+	for time.Since(startTime) < maxPollingDuration {
+		attempt++
+
+		tagValueOperation, err := client.DeleteTagValue(ctx, &resourcemanagerpb.DeleteTagValueRequest{
+			Name: tagValueName,
+		})
+
+		if err != nil {
+			s, ok := grpcstatus.FromError(err)
+			if ok && s.Code() == grpccodes.NotFound {
+				tb.Logf("Tag value %s already deleted (or never existed) after %v.", tagValueName, time.Since(startTime))
+				return
+			}
+
+			if ok && s.Code() == grpccodes.FailedPrecondition && strings.Contains(s.Message(), "attached to resources") {
+				delay := initialDelay * time.Duration(1<<uint(attempt-1))
+				if delay > maxBackoffDelay {
+					delay = maxBackoffDelay
+				}
+				time.Sleep(delay)
+				continue
+			}
+
+			tb.Errorf("testCleanupTagValue: failed to initiate delete for tag value %s due to unrecoverable error: %v", tagValueName, err)
+			return
+		}
+
+		_, err = tagValueOperation.Wait(ctx)
+		if err != nil {
+			s, ok := grpcstatus.FromError(err)
+			if ok && s.Code() == grpccodes.NotFound {
+				tb.Logf("Tag value %s was deleted during operation wait (or already gone).", tagValueName)
+				return
+			}
+			if ok && s.Code() == grpccodes.FailedPrecondition && strings.Contains(s.Message(), "attached to resources") {
+				delay := initialDelay * time.Duration(1<<uint(attempt-1))
+				if delay > maxBackoffDelay {
+					delay = maxBackoffDelay
+				}
+				time.Sleep(delay)
+				continue
+			}
+
+			tb.Errorf("testCleanupTagValue: failed to delete tag value %s after waiting for operation due to unrecoverable error: %v", tagValueName, err)
+			return
+		}
+
+		tb.Logf("Successfully deleted tag value %s after %v (attempt %d).", tagValueName, time.Since(startTime), attempt)
+		return
+	}
+	tb.Errorf("testCleanupTagValue: failed to delete tag value %s after %v (max duration reached). It might still be attached.", tagValueName, maxPollingDuration)
+}
+
+func TestCreateSecretWithTags(t *testing.T) {
+	tc := testutil.SystemTest(t)
+
+	secretID := "createSecretWithTags"
+
+	parent := fmt.Sprintf("projects/%s", tc.ProjectID)
+
+	tagKey := testCreateTagKey(t, tc.ProjectID)
+	defer testCleanupTagKey(t, tagKey.Name)
+	tagValue := testCreateTagValue(t, tagKey.GetName())
+	defer testCleanupTagValue(t, tagValue.Name)
+
+	t.Logf("Secret ID used: %s", secretID)
+	t.Logf("Tag Key used: %s", tagKey.GetName())
+	t.Logf("Tag Value used: %s", tagValue.Name)
+
+	var b bytes.Buffer
+	if err := createSecretWithTags(&b, parent, secretID, tagKey.GetName(), tagValue.GetName()); err != nil {
+		t.Fatal(err)
+	}
+	defer testCleanupSecret(t, fmt.Sprintf("projects/%s/secrets/%s", tc.ProjectID, secretID))
+
+	if got, want := b.String(), "Created secret with tags:"; !strings.Contains(got, want) {
+		t.Errorf("createSecretWithTags: expected %q to contain %q", got, want)
+	}
+
 }

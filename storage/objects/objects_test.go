@@ -17,6 +17,7 @@ package objects
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -220,6 +221,7 @@ func TestObjects(t *testing.T) {
 		t.Errorf("getMetadata: %v", err)
 	}
 	t.Run("publicFile", func(t *testing.T) {
+		t.Skip("Skipping due to project permissions changes, see: b/445769988")
 		if err := makePublic(io.Discard, bucket, object1); err != nil {
 			t.Errorf("makePublic: %v", err)
 		}
@@ -273,16 +275,61 @@ func TestObjects(t *testing.T) {
 		t.Errorf("copyFile: %v", err)
 	}
 	t.Run("composeFile", func(t *testing.T) {
-		if err := composeFile(io.Discard, bucket, object1, object2, dstObj); err != nil {
+		// Test with deleteSourceObjects = false.
+		if err := composeFile(io.Discard, bucket, object1, object2, dstObj, false); err != nil {
 			t.Errorf("composeFile: %v", err)
 		}
 		bkt := client.Bucket(bucket)
 		obj := bkt.Object(dstObj)
 		_, err = obj.Attrs(ctx)
-		if err == storage.ErrObjectNotExist {
+		if errors.Is(err, storage.ErrObjectNotExist) {
 			t.Errorf("Destination object was not created")
 		} else if err != nil {
 			t.Errorf("object.Attrs: %v", err)
+		}
+
+		// Verify source objects still exist.
+		for _, src := range []string{object1, object2} {
+			if _, err := bkt.Object(src).Attrs(ctx); err != nil {
+				t.Errorf("Source object %q should still exist, but got err: %v", src, err)
+			}
+		}
+
+		// Test with deleteSourceObjects = true.
+		// Use distinct source objects for this test to avoid deleting the shared test objects
+		// (object1, object2) which are needed for subsequent tests in the suite.
+		composeDeleteSrc1 := "compose-src-1-temp.txt"
+		composeDeleteSrc2 := "compose-src-2-temp.txt"
+		composeDeleteDst := "foobar-temp.txt"
+		if err := uploadFile(io.Discard, bucket, composeDeleteSrc1); err != nil {
+			t.Fatalf("uploadFile(%q): %v", composeDeleteSrc1, err)
+		}
+		if err := uploadFile(io.Discard, bucket, composeDeleteSrc2); err != nil {
+			t.Fatalf("uploadFile(%q): %v", composeDeleteSrc2, err)
+		}
+
+		if err := composeFile(io.Discard, bucket, composeDeleteSrc1, composeDeleteSrc2, composeDeleteDst, true); err != nil {
+			t.Errorf("composeFile(deleteSourceObjects=true): %v", err)
+		}
+
+		// Verify destination object was created.
+		_, err = bkt.Object(composeDeleteDst).Attrs(ctx)
+		if errors.Is(err, storage.ErrObjectNotExist) {
+			t.Errorf("Destination object %q was not created", composeDeleteDst)
+		} else if err != nil {
+			t.Errorf("object.Attrs: %v", err)
+		}
+
+		// Verify source objects are deleted.
+		for _, src := range []string{composeDeleteSrc1, composeDeleteSrc2} {
+			if _, err := bkt.Object(src).Attrs(ctx); !errors.Is(err, storage.ErrObjectNotExist) {
+				t.Errorf("Source object %q should have been deleted, but got err: %v", src, err)
+			}
+		}
+
+		// Clean up the temporary destination object.
+		if err := bkt.Object(composeDeleteDst).Delete(ctx); err != nil && !errors.Is(err, storage.ErrObjectNotExist) {
+			t.Errorf("failed to clean up destination object %q: %v", composeDeleteDst, err)
 		}
 	})
 
@@ -376,6 +423,7 @@ func TestKMSObjects(t *testing.T) {
 }
 
 func TestV4SignedURL(t *testing.T) {
+	t.Skip("Skipping due to project permissions changes, see: b/445769988")
 	tc := testutil.SystemTest(t)
 	ctx := context.Background()
 	client, err := storage.NewClient(ctx)
@@ -675,5 +723,246 @@ func TestObjectRetention(t *testing.T) {
 	}
 	if got, want := attrs.Retention.RetainUntil, start.Add(time.Hour*24*10); got.After(want) {
 		t.Errorf("retention time should be less than 10 days from the start of the test; got %v, want sooner than %v", got, want)
+	}
+}
+
+func TestListSoftDeletedObjects(t *testing.T) {
+	tc := testutil.SystemTest(t)
+	ctx := context.Background()
+
+	client, err := storage.NewClient(ctx)
+	if err != nil {
+		t.Fatalf("storage.NewClient: %v", err)
+	}
+	t.Cleanup(func() { client.Close() })
+
+	var (
+		bucketName = testutil.UniqueBucketName(testPrefix)
+		objectName = "soft-deleted-object.txt"
+	)
+
+	bucket := client.Bucket(bucketName)
+	if err := bucket.Create(ctx, tc.ProjectID, &storage.BucketAttrs{SoftDeletePolicy: &storage.SoftDeletePolicy{
+		RetentionDuration: 10 * 24 * time.Hour, // 10 days in hours
+	}}); err != nil {
+		t.Fatalf("Bucket.Create(%q): %v", bucketName, err)
+	}
+	defer testutil.DeleteBucketIfExists(ctx, client, bucketName)
+
+	// Upload the object to the bucket.
+	if err := uploadFile(io.Discard, bucketName, objectName); err != nil {
+		t.Fatalf("uploadFile(%q): %v", objectName, err)
+	}
+
+	obj := client.Bucket(bucketName).Object(objectName)
+	// Simulate soft deletion by deleting the object.
+	if err := obj.Delete(ctx); err != nil {
+		t.Fatalf("Object(%q).Delete: %v", objectName, err)
+	}
+
+	var buf bytes.Buffer
+	if err := listSoftDeletedObjects(&buf, bucketName); err != nil {
+		t.Fatalf("listSoftDeletedObjects: %v", err)
+	}
+	// Verify the output was printed as expected.
+	got := buf.String()
+	want := fmt.Sprintf("Soft-deleted object: %s\n", objectName)
+	if !strings.HasPrefix(got, want) {
+		t.Errorf("Output mismatch: got %q, want %q", got, want)
+	}
+}
+
+func TestRestoreSoftDeletedObject(t *testing.T) {
+	tc := testutil.SystemTest(t)
+	ctx := context.Background()
+
+	client, err := storage.NewClient(ctx)
+	if err != nil {
+		t.Fatalf("storage.NewClient: %v", err)
+	}
+	t.Cleanup(func() { client.Close() })
+
+	var (
+		bucketName = testutil.UniqueBucketName(testPrefix)
+		objectName = "soft-deleted-object.txt"
+	)
+
+	bucket := client.Bucket(bucketName)
+	if err := bucket.Create(ctx, tc.ProjectID, &storage.BucketAttrs{SoftDeletePolicy: &storage.SoftDeletePolicy{
+		RetentionDuration: 10 * 24 * time.Hour, // 10 days in hours
+	}}); err != nil {
+		t.Fatalf("Bucket.Create(%q): %v", bucketName, err)
+	}
+	defer testutil.DeleteBucketIfExists(ctx, client, bucketName)
+
+	// Upload the object to the bucket.
+	if err := uploadFile(io.Discard, bucketName, objectName); err != nil {
+		t.Fatalf("uploadFile(%q): %v", objectName, err)
+	}
+
+	// Get object attributes to retrieve the generation before deleting the object.
+	obj := client.Bucket(bucketName).Object(objectName)
+	attrs, err := obj.Attrs(ctx)
+	if err != nil {
+		t.Fatalf("Object(%q).Attrs: %v", objectName, err)
+	}
+	generation := attrs.Generation
+	// Simulate soft deletion by deleting the object.
+	if err := obj.Delete(ctx); err != nil {
+		t.Fatalf("Object(%q).Delete: %v", objectName, err)
+	}
+
+	var buf bytes.Buffer
+	if err := restoreSoftDeletedObject(&buf, bucketName, objectName, generation); err != nil {
+		t.Fatalf("restoreSoftDeletedObject: %v", err)
+	}
+	if !strings.Contains(buf.String(), "has been restored") {
+		t.Errorf("restoreSoftDeletedObject output mismatch: got %q", buf.String())
+	}
+
+	// Verify the object is restored by checking its attributes.
+	restoredAttrs, err := obj.Attrs(ctx)
+	if err != nil {
+		t.Fatalf("Object(%q).Attrs after restore: %v", objectName, err)
+	}
+	if !restoredAttrs.Deleted.IsZero() {
+		t.Errorf("Object(%q) is still marked as deleted after restore", objectName)
+	}
+}
+
+func TestListSoftDeletedVersionsOfObject(t *testing.T) {
+	tc := testutil.SystemTest(t)
+	ctx := context.Background()
+
+	client, err := storage.NewClient(ctx)
+	if err != nil {
+		t.Fatalf("storage.NewClient: %v", err)
+	}
+	t.Cleanup(func() { client.Close() })
+
+	var (
+		bucketName  = testutil.UniqueBucketName(testPrefix)
+		objectName1 = "soft-deleted-object.txt"
+		objectName2 = "soft-deleted-object-2.txt"
+	)
+
+	bucket := client.Bucket(bucketName)
+	if err := bucket.Create(ctx, tc.ProjectID, &storage.BucketAttrs{SoftDeletePolicy: &storage.SoftDeletePolicy{
+		RetentionDuration: 10 * 24 * time.Hour, // 10 days in hours
+	}}); err != nil {
+		t.Fatalf("Bucket.Create(%q): %v", bucketName, err)
+	}
+	defer testutil.DeleteBucketIfExists(ctx, client, bucketName)
+
+	// Upload both objects to the bucket.
+	if err := uploadFile(io.Discard, bucketName, objectName1); err != nil {
+		t.Fatalf("uploadFile(%q): %v", objectName1, err)
+	}
+	if err := uploadFile(io.Discard, bucketName, objectName2); err != nil {
+		t.Fatalf("uploadFile(%q): %v", objectName2, err)
+	}
+
+	// Get object attributes of object 1 to retrieve the generation.
+	obj1 := client.Bucket(bucketName).Object(objectName1)
+	attrs, err := obj1.Attrs(ctx)
+	if err != nil {
+		t.Fatalf("Object(%q).Attrs: %v", objectName1, err)
+	}
+	generation := attrs.Generation
+	// Simulate soft deletion by deleting both objects.
+	if err := obj1.Delete(ctx); err != nil {
+		t.Fatalf("Object(%q).Delete: %v", objectName1, err)
+	}
+	if err := client.Bucket(bucketName).Object(objectName2).Delete(ctx); err != nil {
+		t.Fatalf("Object(%q).Delete: %v", objectName2, err)
+	}
+
+	var buf bytes.Buffer
+	if err := listSoftDeletedVersionsOfObject(&buf, bucketName, objectName1); err != nil {
+		t.Fatalf("listSoftDeletedVersionsOfObject: %v", err)
+	}
+	// Verify the output was printed as expected-- only objectName1 should be listed.
+	got := buf.String()
+	want := fmt.Sprintf("Soft-deleted object version: %s (generation: %d)\n", objectName1, generation)
+	if !strings.HasPrefix(got, want) {
+		t.Errorf("Output mismatch: got %q, want %q", got, want)
+	}
+}
+
+func TestObjectContexts(t *testing.T) {
+	tc := testutil.SystemTest(t)
+	ctx := context.Background()
+	client, err := storage.NewClient(ctx)
+	if err != nil {
+		t.Fatalf("storage.NewClient: %v", err)
+	}
+	t.Cleanup(func() { client.Close() })
+
+	bucketName := testutil.CreateTestBucket(ctx, t, client, tc.ProjectID, testPrefix)
+	objectName := "context-object.txt"
+
+	// Set new contexts on object.
+	if err := uploadWithObjectContexts(io.Discard, bucketName, objectName); err != nil {
+		t.Fatalf("setObjectContexts: %v", err)
+	}
+
+	var getBuf bytes.Buffer
+	if err := getObjectContexts(&getBuf, bucketName, objectName); err != nil {
+		t.Fatalf("getObjectContexts: %v", err)
+	}
+	// Check for new object contexts.
+	got := getBuf.String()
+	wantGet1 := "key1 = value1"
+	if !strings.Contains(got, wantGet1) {
+		t.Errorf("getObjectContexts() got %q; want to contain %q", got, wantGet1)
+	}
+	wantGet2 := "key2 = value2"
+	if !strings.Contains(got, wantGet2) {
+		t.Errorf("getObjectContexts() got %q; want to contain %q", got, wantGet2)
+	}
+
+	// Patch contexts on existing object.
+	var patchBuf bytes.Buffer
+	if err := setObjectContexts(&patchBuf, bucketName, objectName); err != nil {
+		t.Fatalf("setObjectContexts: %v", err)
+	}
+	gotPatch := patchBuf.String()
+	wantGet1 = "key1 = newValue1"
+	if !strings.Contains(gotPatch, wantGet1) {
+		t.Errorf("setObjectContexts() got %q; want to contain %q", gotPatch, wantGet1)
+	}
+	wantGet2 = "key3 = value3"
+	if !strings.Contains(gotPatch, wantGet2) {
+		t.Errorf("setObjectContexts() got %q; want to contain %q", gotPatch, wantGet2)
+	}
+	// Object should not contain deleted key.
+	absentKey := "key2"
+	if strings.Contains(gotPatch, absentKey) {
+		t.Errorf("setObjectContexts() got %q; should not contain %q", gotPatch, absentKey)
+	}
+
+	var listBuf bytes.Buffer
+	filter := "contexts.\"key1\"=\"newValue1\""
+	if err := listObjectContexts(&listBuf, bucketName, filter); err != nil {
+		t.Fatalf("listObjectContexts: %v", err)
+	}
+	gotList := listBuf.String()
+	if !strings.Contains(gotList, objectName) {
+		t.Errorf("listObjectContexts() got %q; want to contain %q", gotList, objectName)
+	}
+
+	// Delete all contexts of an object.
+	if err := deleteObjectContexts(io.Discard, bucketName, objectName); err != nil {
+		t.Fatalf("setObjectContexts: %v", err)
+	}
+
+	var getBufAfterDelete bytes.Buffer
+	if err := getObjectContexts(&getBufAfterDelete, bucketName, objectName); err != nil {
+		t.Fatalf("getObjectContexts: %v", err)
+	}
+	gotAfterDelete := getBufAfterDelete.String()
+	wantAfterDelete := fmt.Sprintf("No contexts found for %v", objectName)
+	if !strings.Contains(gotAfterDelete, wantAfterDelete) {
+		t.Errorf("getObjectContexts() got %q; want %q", gotAfterDelete, wantAfterDelete)
 	}
 }

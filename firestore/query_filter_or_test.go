@@ -17,22 +17,17 @@ package firestore
 import (
 	"bytes"
 	"context"
-	"log"
-	"os"
 	"strings"
 	"testing"
 
 	"cloud.google.com/go/firestore"
 )
 
-var projectID string
-
-func TestMain(m *testing.M) {
+func testQueryFilterOrSetup(projectID string) ([]*firestore.DocumentRef, error) {
 	ctx := context.Background()
-	projectID = os.Getenv("GOLANG_SAMPLES_FIRESTORE_PROJECT")
 	client, err := firestore.NewClient(ctx, projectID)
 	if err != nil {
-		log.Fatal(err)
+		return nil, err
 	}
 	defer client.Close()
 
@@ -54,30 +49,51 @@ func TestMain(m *testing.M) {
 		ref := client.Collection(colName).Doc(d.shortName)
 		_, err := bw.Create(ref, map[string]interface{}{"birthYear": d.birthYear})
 		if err != nil {
-			log.Fatal(err)
+			return nil, err
 		}
 		refs = append(refs, ref)
 	}
 	bw.End()
+	return refs, nil
+}
 
-	// Run the test
-	m.Run()
+func testQueryFilterOrCleanup(projectID string, refs []*firestore.DocumentRef) error {
+	ctx := context.Background()
+	client, err := firestore.NewClient(ctx, projectID)
+	if err != nil {
+		return err
+	}
+	defer client.Close()
 
 	// New BulkWriter instance
-	bw = client.BulkWriter(ctx)
+	bw := client.BulkWriter(ctx)
 
 	for _, d := range refs {
 		_, err := bw.Delete(d)
 		if err != nil {
-			log.Fatal(err)
+			return err
 		}
 	}
 	bw.End()
+	return nil
 }
 
 func TestQueryFilterOr(t *testing.T) {
+	pid := getProjectID(t)
+
+	refs, err := testQueryFilterOrSetup(pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		err := testQueryFilterOrCleanup(pid, refs)
+		if err != nil {
+			t.Fatal(err)
+		}
+	})
+
 	var buf bytes.Buffer
-	err := queryFilterOr(&buf, projectID)
+	err = queryFilterOr(&buf, pid)
 	if err != nil {
 		t.Fatal(err)
 	}

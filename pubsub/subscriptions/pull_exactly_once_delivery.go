@@ -21,7 +21,8 @@ import (
 	"io"
 	"time"
 
-	"cloud.google.com/go/pubsub"
+	"cloud.google.com/go/pubsub/v2"
+	"google.golang.org/api/option"
 )
 
 // receiveMessagesWithExactlyOnceDeliveryEnabled instantiates a subscriber client.
@@ -33,17 +34,23 @@ func receiveMessagesWithExactlyOnceDeliveryEnabled(w io.Writer, projectID, subID
 	// projectID := "my-project-id"
 	// subID := "my-sub"
 	ctx := context.Background()
-	client, err := pubsub.NewClient(ctx, projectID)
+
+	// Pub/Sub's exactly once delivery guarantee only applies when subscribers connect to the service in the same region.
+	// For list of locational endpoints for Pub/Sub, see https://cloud.google.com/pubsub/docs/reference/service_apis_overview#list_of_locational_endpoints
+	client, err := pubsub.NewClient(ctx, projectID, option.WithEndpoint("us-west1-pubsub.googleapis.com:443"))
 	if err != nil {
 		return fmt.Errorf("pubsub.NewClient: %w", err)
 	}
 	defer client.Close()
 
-	sub := client.Subscription(subID)
-	// Set MinExtensionPeriod high to avoid any unintentional
+	// client.Subscriber can be passed a subscription ID (e.g. "my-sub") or
+	// a fully qualified name (e.g. "projects/my-project/subscriptions/my-sub").
+	// If a subscription ID is provided, the project ID from the client is used.
+	sub := client.Subscriber(subID)
+	// Set MinDurationPerAckExtension high to avoid any unintentional
 	// acknowledgment expirations (e.g. due to network events).
 	// This can lead to high tail latency in case of client crashes.
-	sub.ReceiveSettings.MinExtensionPeriod = 600 * time.Second
+	sub.ReceiveSettings.MinDurationPerAckExtension = 600 * time.Second
 
 	// Receive messages for 10 seconds, which simplifies testing.
 	// Comment this out in production, since `Receive` should

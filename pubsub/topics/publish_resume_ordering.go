@@ -20,7 +20,7 @@ import (
 	"fmt"
 	"io"
 
-	"cloud.google.com/go/pubsub"
+	"cloud.google.com/go/pubsub/v2"
 	"google.golang.org/api/option"
 )
 
@@ -29,8 +29,8 @@ func resumePublishWithOrderingKey(w io.Writer, projectID, topicID string) {
 	// topicID := "my-topic"
 	ctx := context.Background()
 
-	// Sending messages to the same region ensures they are received in order
-	// even when multiple publishers are used.
+	// Pub/Sub's ordered delivery guarantee only applies when publishes for an ordering key are in the same region
+	// For list of locational endpoints for Pub/Sub, see https://cloud.google.com/pubsub/docs/reference/service_apis_overview#list_of_locational_endpoints
 	client, err := pubsub.NewClient(ctx, projectID,
 		option.WithEndpoint("us-east1-pubsub.googleapis.com:443"))
 	if err != nil {
@@ -39,23 +39,29 @@ func resumePublishWithOrderingKey(w io.Writer, projectID, topicID string) {
 	}
 	defer client.Close()
 
-	t := client.Topic(topicID)
-	t.EnableMessageOrdering = true
+	// client.Publisher can be passed a topic ID (e.g. "my-topic") or
+	// a fully qualified name (e.g. "projects/my-project/topics/my-topic").
+	// If a topic ID is provided, the project ID from the client is used.
+	// Reuse this publisher for all publish calls to send messages in batches.
+	publisher := client.Publisher(topicID)
+	publisher.EnableMessageOrdering = true
 	key := "some-ordering-key"
 
-	res := t.Publish(ctx, &pubsub.Message{
+	result := publisher.Publish(ctx, &pubsub.Message{
 		Data:        []byte("some-message"),
 		OrderingKey: key,
 	})
-	_, err = res.Get(ctx)
+	_, err = result.Get(ctx)
 	if err != nil {
-		// Error handling code can be added here.
+		// Fix internal state to make sure publishes with errors are not
+		// published out of order. This might mean moving messages to a queue
+		// and retrying those messages before publishing subsquent messages.
 		fmt.Printf("Failed to publish: %s\n", err)
 
 		// Resume publish on an ordering key that has had unrecoverable errors.
 		// After such an error publishes with this ordering key will fail
 		// until this method is called.
-		t.ResumePublish(key)
+		publisher.ResumePublish(key)
 	}
 
 	fmt.Fprint(w, "Published a message with ordering key successfully\n")

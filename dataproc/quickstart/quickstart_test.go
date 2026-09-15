@@ -64,8 +64,8 @@ func setup(t *testing.T, projectID string) {
 
 	w := obj.NewWriter(ctx)
 
-	if _, err := fmt.Fprintf(w, code); err != nil {
-		if err2 := w.Close(); err != nil {
+	if _, err := fmt.Fprint(w, code); err != nil {
+		if err2 := w.Close(); err2 != nil {
 			t.Errorf("Error writing to file and closing it: %v", err2)
 		}
 		t.Errorf("Error writing to file: %v", err)
@@ -106,6 +106,7 @@ func deleteCluster(ctx context.Context, projectID, region, clusterName string) e
 }
 
 func TestQuickstart(t *testing.T) {
+	t.Skip("Skipped until https://github.com/GoogleCloudPlatform/golang-samples/issues/4350 is resolved.")
 	tc := testutil.EndToEndTest(t)
 	m := testutil.BuildMain(t)
 	setup(t, tc.ProjectID)

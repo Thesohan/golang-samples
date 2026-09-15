@@ -1,7 +1,7 @@
 module github.com/GoogleCloudPlatform/golang-samples/run/h2c
 
-go 1.19
+go 1.25.0
 
-require golang.org/x/net v0.27.0
+require golang.org/x/net v0.55.0
 
-require golang.org/x/text v0.16.0 // indirect
+require golang.org/x/text v0.37.0 // indirect

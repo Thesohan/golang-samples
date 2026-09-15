@@ -27,9 +27,9 @@ import (
 	"time"
 
 	"cloud.google.com/go/iam"
+	"cloud.google.com/go/iam/apiv1/iampb"
 	"cloud.google.com/go/storage"
 	"github.com/GoogleCloudPlatform/golang-samples/internal/testutil"
-	iampb "google.golang.org/genproto/googleapis/iam/v1"
 )
 
 const (
@@ -157,6 +157,28 @@ func TestListBuckets(t *testing.T) {
 			r.Errorf("got bucket list: %v; want %q in the list", buckets, bucketName)
 		}
 	})
+}
+
+// This test will run the listBucketsPartialSuccess function against the live GCS service.
+// However, it's not expected to encounter unreachable buckets under normal operating conditions,
+// unless there's a rare event of a broader GCS service outage. Therefore, this test mainly
+// verifies that the call doesn't fail, but not the core functionality of reporting unreachable buckets.
+func TestListBucketsPartialSuccess(t *testing.T) {
+	tc := testutil.SystemTest(t)
+	var buf bytes.Buffer
+	if err := listBucketsPartialSuccess(&buf, tc.ProjectID); err != nil {
+		t.Fatalf("listBucketsPartialSuccess failed: %v", err)
+	}
+
+	got := buf.String()
+	if !strings.Contains(got, "Reachable buckets:") {
+		t.Errorf("Output missing 'Reachable buckets:' section, got:\n%s", got)
+	}
+
+	// In a live test, we expect no unreachable buckets.
+	if !strings.Contains(got, "No unreachable buckets.") {
+		t.Errorf("Output missing 'No unreachable buckets.' section when no buckets were unreachable, got:\n%s", got)
+	}
 }
 
 func TestGetBucketMetadata(t *testing.T) {
@@ -584,6 +606,7 @@ func TestBucketWebsiteInfo(t *testing.T) {
 }
 
 func TestSetBucketPublicIAM(t *testing.T) {
+	t.Skip("Skipping due to project permissions changes, see: b/445769988")
 	tc := testutil.SystemTest(t)
 	ctx := context.Background()
 
@@ -781,5 +804,134 @@ func TestCreateBucketObjectRetention(t *testing.T) {
 
 	if got, want := buf.String(), "Enabled"; !strings.Contains(got, want) {
 		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestSetSoftDeletePolicy(t *testing.T) {
+	tc := testutil.SystemTest(t)
+	ctx := context.Background()
+
+	client, err := storage.NewClient(ctx)
+	if err != nil {
+		t.Fatalf("storage.NewClient: %v", err)
+	}
+	defer client.Close()
+
+	bucketName := testutil.CreateTestBucket(ctx, t, client, tc.ProjectID, testPrefix)
+	defer testutil.DeleteBucketIfExists(ctx, client, bucketName)
+
+	var buf = bytes.Buffer{}
+	if err := setSoftDeletePolicy(&buf, bucketName); err != nil {
+		t.Fatalf("setSoftDeletePolicy: %v", err)
+	}
+
+	// Verify the output was printed as expected.
+	gotOutput := buf.String()
+	wantOutput := fmt.Sprintf("Soft delete policy for %s was set to a 10-day retention period\n", bucketName)
+	if gotOutput != wantOutput {
+		t.Errorf("Output mismatch: got %q, want %q", gotOutput, wantOutput)
+	}
+}
+
+func TestGetSoftDeletePolicy(t *testing.T) {
+	tc := testutil.SystemTest(t)
+	ctx := context.Background()
+
+	client, err := storage.NewClient(ctx)
+	if err != nil {
+		t.Fatalf("storage.NewClient: %v", err)
+	}
+	defer client.Close()
+
+	bucketName := testutil.CreateTestBucket(ctx, t, client, tc.ProjectID, testPrefix)
+	defer testutil.DeleteBucketIfExists(ctx, client, bucketName)
+
+	var buf = bytes.Buffer{}
+	if err := getSoftDeletePolicy(&buf, bucketName); err != nil {
+		t.Fatalf("getSoftDeletePolicy: %v", err)
+	}
+
+	// Verify the output was printed as expected.
+	got := buf.String()
+	want := fmt.Sprintf("Soft delete policy for bucket %s is:\n", bucketName)
+	if !strings.HasPrefix(got, want) {
+		t.Errorf("Output mismatch: got %q, want %q", got, want)
+	}
+}
+
+func TestDisableSoftDeletePolicy(t *testing.T) {
+	tc := testutil.SystemTest(t)
+	ctx := context.Background()
+
+	client, err := storage.NewClient(ctx)
+	if err != nil {
+		t.Fatalf("storage.NewClient: %v", err)
+	}
+	defer client.Close()
+
+	bucketName := testutil.CreateTestBucket(ctx, t, client, tc.ProjectID, testPrefix)
+	defer testutil.DeleteBucketIfExists(ctx, client, bucketName)
+
+	var buf = bytes.Buffer{}
+	if err := disableSoftDeletePolicy(&buf, bucketName); err != nil {
+		t.Fatalf("disableSoftDeletePolicy: %v", err)
+	}
+
+	// Verify the output was printed as expected.
+	got := buf.String()
+	want := fmt.Sprintf("Soft delete policy for bucket %s was disabled.\n", bucketName)
+	if !strings.HasPrefix(got, want) {
+		t.Errorf("Output mismatch: got %q, want %q", got, want)
+	}
+}
+
+func TestBucketEncryptionEnforcement(t *testing.T) {
+	tc := testutil.SystemTest(t)
+	bucketName := testutil.UniqueBucketName(testPrefix)
+	ctx := context.Background()
+
+	client, err := storage.NewClient(ctx)
+	if err != nil {
+		t.Fatalf("storage.NewClient: %v", err)
+	}
+	defer client.Close()
+
+	defer testutil.DeleteBucketIfExists(ctx, client, bucketName)
+
+	var setBuf bytes.Buffer
+	if err := setBucketEncryptionEnforcementConfig(&setBuf, tc.ProjectID, bucketName); err != nil {
+		t.Fatalf("setBucketEncryptionEnforcementConfig: %v", err)
+	}
+
+	gotSet := setBuf.String()
+	wantSet := fmt.Sprintf("Bucket %v encryption enforcement policies set.", bucketName)
+	if !strings.Contains(gotSet, wantSet) {
+		t.Errorf("setBucketEncryptionEnforcementConfig: got %q, want %q", gotSet, wantSet)
+	}
+
+	var getBuf bytes.Buffer
+	if err := getBucketEncryptionEnforcement(&getBuf, bucketName); err != nil {
+		t.Fatalf("getBucketEncryptionEnforcement: %v", err)
+	}
+	gotGet := getBuf.String()
+	if !strings.Contains(gotGet, "Google Managed Encryption Enforcement Config: FullyRestricted") {
+		t.Errorf("getBucketEncryptionEnforcement: got %q, want to contain %q", gotGet, "Google Managed Encryption Enforcement Config: FullyRestricted")
+	}
+	if !strings.Contains(gotGet, "Customer Supplied Encryption Enforcement Config: FullyRestricted") {
+		t.Errorf("getBucketEncryptionEnforcement: got %q, want to contain %q", gotGet, "Customer Supplied Encryption Enforcement Config: FullyRestricted")
+	}
+	if !strings.Contains(gotGet, "Customer Managed Encryption Enforcement Config: NotRestricted") {
+		t.Errorf("getBucketEncryptionEnforcement: got %q, want to contain %q", gotGet, "Customer Managed Encryption Enforcement Config: NotRestricted")
+	}
+
+	var updateBuf bytes.Buffer
+	if err := updateBucketEncryptionEnforcementConfig(&updateBuf, bucketName); err != nil {
+		t.Fatalf("updateBucketEncryptionEnforcementConfig: %v", err)
+	}
+
+	gotUpdate := updateBuf.String()
+	wantUpdate := fmt.Sprintf("Bucket %v encryption enforcement policies updated.", bucketName)
+	if !strings.Contains(gotUpdate, wantUpdate) {
+		t.Errorf("updateBucketEncryptionEnforcementConfig: got %q, want %q", gotUpdate, wantUpdate)
 	}
 }

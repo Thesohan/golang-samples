@@ -14,7 +14,7 @@
 
 package findings
 
-// [START securitycenter_list_findings_at_time]
+// [START securitycenter_list_findings_within_time_range]
 import (
 	"context"
 	"fmt"
@@ -23,7 +23,6 @@ import (
 
 	securitycenter "cloud.google.com/go/securitycenter/apiv1"
 	"cloud.google.com/go/securitycenter/apiv1/securitycenterpb"
-	"github.com/golang/protobuf/ptypes"
 	"google.golang.org/api/iterator"
 )
 
@@ -46,14 +45,12 @@ func listFindingsAtTime(w io.Writer, sourceName string) error {
 		return fmt.Errorf("securitycenter.NewClient: %w", err)
 	}
 	defer client.Close() // Closing the client safely cleans up background resources.
-	fiveDaysAgo, err := ptypes.TimestampProto(time.Now().AddDate(0, 0, -5))
-	if err != nil {
-		return fmt.Errorf("Error converting five days ago: %w", err)
-	}
+
+	fiveDaysAgo := time.Now().AddDate(0, 0, -5).Format(time.RFC3339)
 
 	req := &securitycenterpb.ListFindingsRequest{
-		Parent:   sourceName,
-		ReadTime: fiveDaysAgo,
+		Parent: sourceName,
+		Filter: fmt.Sprintf("event_time < %q", fiveDaysAgo),
 	}
 	it := client.ListFindings(ctx, req)
 	for {
@@ -72,4 +69,4 @@ func listFindingsAtTime(w io.Writer, sourceName string) error {
 	return nil
 }
 
-// [END securitycenter_list_findings_at_time]
+// [END securitycenter_list_findings_within_time_range]
